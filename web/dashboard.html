@@ -1,0 +1,65 @@
+{{define "dashboard"}}
+<!DOCTYPE html>
+<html lang="ru">
+<head><title>Обзор · Uptime Monitor</title>{{template "head"}}</head>
+<body>
+{{template "header"}}
+<main class="shell">
+  <div class="page-heading">
+    <div><h1>Доступность сайтов</h1><p>Статус проверок и история за последние 24 часа</p></div>
+    <a class="button primary" href="#add-site" data-open-form><span aria-hidden="true">+</span> Добавить сайт</a>
+  </div>
+
+  <details class="panel add-panel" id="add-site" {{if .Form.Error}}open{{end}}>
+    <summary>Новый сайт</summary>
+    {{if .Form.Error}}<p class="form-error" role="alert">{{.Form.Error}}</p>{{end}}
+    <form action="/" method="post" class="add-form">
+      <label>Адрес сайта<input name="url" type="url" required maxlength="2048" placeholder="https://example.com" value="{{.Form.URL}}"></label>
+      <label>Название <span class="muted">(необязательно)</span><input name="name" maxlength="80" placeholder="Например, главная" value="{{.Form.Name}}"></label>
+      <label>Интервал<select name="interval">
+        <option value="15" {{if eq .Form.Interval 15}}selected{{end}}>15 секунд</option>
+        <option value="30" {{if eq .Form.Interval 30}}selected{{end}}>30 секунд</option>
+        <option value="60" {{if eq .Form.Interval 60}}selected{{end}}>1 минута</option>
+        <option value="300" {{if eq .Form.Interval 300}}selected{{end}}>5 минут</option>
+      </select></label>
+      <button class="button primary" type="submit">Начать мониторинг</button>
+    </form>
+  </details>
+
+  <div id="dashboard-data" data-refresh>
+    <section class="metrics" aria-label="Сводка">
+      <div class="panel metric"><span class="metric-label"><span class="dot neutral"></span> Всего сайтов</span><strong>{{len .Sites}}</strong></div>
+      <div class="panel metric"><span class="metric-label"><span class="dot up"></span> Доступны</span><strong>{{.Up}}</strong></div>
+      <div class="panel metric"><span class="metric-label"><span class="dot down"></span> Со сбоями</span><strong>{{.Down}}</strong></div>
+    </section>
+
+    <section class="panel site-panel" aria-labelledby="sites-heading">
+      <header class="panel-heading"><h2 id="sites-heading">Отслеживаемые сайты</h2>
+        {{if .Sites}}<div class="legend"><span><i class="dot up"></i> Доступен</span><span><i class="dot down"></i> Сбой</span><span><i class="dot neutral"></i> Нет данных</span></div>{{end}}
+      </header>
+      {{if .Sites}}
+      <div class="site-columns" aria-hidden="true"><span>Сайт</span><span>Статус</span><span>Задержка</span><span>Доступность за 24 часа</span></div>
+      <ul class="site-list">
+        {{range .Sites}}
+        <li class="site-row">
+          <div class="site-name"><a href="/sites/{{.ID}}">{{.Name}}</a><span class="site-url" title="{{.URL}}">{{.URL}}</span></div>
+          <div>{{template "status" .Last}}{{with .Last}}<time class="site-url" datetime="{{datetime .At}}" title="{{date .At}}">{{clock .At}}</time>{{end}}</div>
+          <div class="last-latency">{{if .Last}}{{if .Last.OK}}{{.Last.Latency}} <span>мс</span>{{else}}<span title="{{.Last.Problem}}">—</span>{{end}}{{else}}—{{end}}</div>
+          <div class="uptime">
+            <div class="strip" role="img" aria-label="Доступность за последние 24 часа: {{availability .Samples}}">
+            {{range .Samples}}<span class="bar {{if .Failed}}down{{else if .OK}}up{{end}}" title="{{bucketTitle .}}"></span>{{end}}
+            </div>
+            <div class="strip-labels"><span>24 ч назад</span><strong>{{availability .Samples}}</strong><span>Сейчас</span></div>
+          </div>
+        </li>
+        {{end}}
+      </ul>
+      {{else}}
+      <div class="empty"><h3>Пока нет сайтов</h3><p>Добавьте первый адрес, чтобы начать проверки.</p><a href="#add-site" data-open-form>Добавить сайт <span aria-hidden="true">↗</span></a></div>
+      {{end}}
+    </section>
+  </div>
+</main>
+</body>
+</html>
+{{end}}
