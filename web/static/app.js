@@ -33,7 +33,6 @@ function initChart() {
   const bottom = 29;
   let selected = null;
   const offsetX = (width, at) => left + ((at - start) / (end - start)) * (width - left - right);
-
   drawChart = () => {
     const { width, height } = canvas.getBoundingClientRect();
     if (!width || !height) return;
@@ -44,7 +43,6 @@ function initChart() {
     context.font = '11px Inter, Segoe UI, sans-serif';
     const plotHeight = height - top - bottom;
     const y = (latency) => top + (1 - latency / ceiling) * plotHeight;
-
     for (let i = 0; i <= 4; i++) {
       const latency = ceiling * i / 4;
       const position = y(latency);
@@ -68,10 +66,7 @@ function initChart() {
     context.beginPath();
     let previous = null;
     for (const check of checks) {
-      if (!check.ok) {
-        previous = null;
-        continue;
-      }
+      if (!check.ok) { previous = null; continue; }
       const x = offsetX(width, check.at);
       if (previous && check.at - previous.at <= breakInterval) context.lineTo(x, y(check.latency));
       else context.moveTo(x, y(check.latency));
@@ -86,7 +81,6 @@ function initChart() {
       context.fill();
     }
   };
-
   canvas.addEventListener('pointermove', (event) => {
     hoveredChart = canvas;
     const { left: canvasLeft, width } = canvas.getBoundingClientRect();
@@ -109,20 +103,89 @@ function initChart() {
   drawChart();
 }
 
+function initSortable() {
+  const list = document.querySelector('[data-sortable]');
+  if (!list) return;
+
+  const searchInput = document.querySelector('.search-form input[name="q"]');
+  if (searchInput && searchInput.value.trim() !== '') {
+    list.querySelectorAll('[data-id]').forEach(row => row.removeAttribute('draggable'));
+    return;
+  }
+
+  let dragEl = null;
+
+  list.querySelectorAll('[data-id]').forEach(row => {
+    row.setAttribute('draggable', 'true');
+
+    row.addEventListener('dragstart', (e) => {
+      dragEl = row;
+      row.classList.add('dragging');
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', row.dataset.id);
+    });
+
+    row.addEventListener('dragend', () => {
+      row.classList.remove('dragging');
+      list.querySelectorAll('[data-id]').forEach(r => {
+        r.classList.remove('drag-over-top', 'drag-over-bottom');
+      });
+      if (dragEl) saveOrder();
+      dragEl = null;
+    });
+
+    row.addEventListener('dragover', (e) => {
+      if (!dragEl || dragEl === row) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      const rect = row.getBoundingClientRect();
+      const midY = rect.top + rect.height / 2;
+      row.classList.remove('drag-over-top', 'drag-over-bottom');
+      row.classList.add(e.clientY < midY ? 'drag-over-top' : 'drag-over-bottom');
+    });
+
+    row.addEventListener('dragleave', () => {
+      row.classList.remove('drag-over-top', 'drag-over-bottom');
+    });
+
+    row.addEventListener('drop', (e) => {
+      e.preventDefault();
+      if (!dragEl || dragEl === row) return;
+      const rect = row.getBoundingClientRect();
+      const midY = rect.top + rect.height / 2;
+      if (e.clientY < midY) list.insertBefore(dragEl, row);
+      else list.insertBefore(dragEl, row.nextSibling);
+      row.classList.remove('drag-over-top', 'drag-over-bottom');
+    });
+  });
+
+  function saveOrder() {
+    const ids = Array.from(list.querySelectorAll('[data-id]'))
+      .map(el => parseInt(el.dataset.id, 10));
+    fetch('/reorder', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(ids),
+    }).catch(() => {});
+  }
+}
+
 initChart();
+initSortable();
 globalThis.addEventListener('resize', () => drawChart?.());
 
 async function refresh() {
   try {
-    const current = document.querySelector('[data-refresh]');
+    const current = document.querySelector('[data-refresh]') || document.querySelector('main.shell');
     if (!current || document.hidden || hoveredChart || current.contains(document.activeElement)) return;
-    const response = await fetch(location.pathname, { cache: 'no-store' });
+    const response = await fetch(location.pathname + location.search, { cache: 'no-store' });
     if (!response.ok) return;
     const documentCopy = new DOMParser().parseFromString(await response.text(), 'text/html');
-    const next = documentCopy.getElementById(current.id);
+    const next = documentCopy.querySelector('main.shell');
     if (next && !document.hidden && !hoveredChart && !current.contains(document.activeElement) && current.innerHTML !== next.innerHTML) {
       current.replaceWith(next);
       initChart();
+      initSortable();
     }
   } catch {
     // Keep the last visible results if polling fails.
@@ -130,5 +193,4 @@ async function refresh() {
     globalThis.setTimeout(refresh, 5000);
   }
 }
-
 globalThis.setTimeout(refresh, 5000);

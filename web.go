@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"database/sql"
 	"embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"html/template"
@@ -17,14 +18,15 @@ import (
 	"unicode/utf8"
 )
 
+// Исправлено: web/*.html и web/static/* вместо web/.html
 //go:embed web/*.html web/static/*
 var assets embed.FS
 
 var durationUnits = strings.NewReplacer("h", " ч ", "m", " мин ", "s", " с")
 
 var pages = template.Must(template.New("pages").Funcs(template.FuncMap{
-	"date":     func(at int64) string { return time.Unix(at, 0).Local().Format("02.01.2006 15:04:05") },
-	"clock":    func(at int64) string { return time.Unix(at, 0).Local().Format("15:04:05") },
+	"date": func(at int64) string { return time.Unix(at, 0).Local().Format("02.01.2006 15:04:05") },
+	"clock": func(at int64) string { return time.Unix(at, 0).Local().Format("15:04:05") },
 	"datetime": func(at int64) string { return time.Unix(at, 0).UTC().Format(time.RFC3339) },
 	"duration": func(from, to int64) string {
 		return strings.TrimSpace(durationUnits.Replace((time.Duration(to-from) * time.Second).String()))
@@ -32,6 +34,14 @@ var pages = template.Must(template.New("pages").Funcs(template.FuncMap{
 	"availability": availability,
 	"bucketTitle": func(b Bucket) string {
 		return fmt.Sprintf("%s · успешно: %d, сбои: %d", time.Unix(b.At, 0).Local().Format("02.01 15:04"), b.OK, b.Failed)
+	},
+	// Добавлена функция json для безопасной передачи данных в <script>
+	"json": func(v any) (template.JS, error) {
+		b, err := json.Marshal(v)
+		if err != nil {
+			return "", err
+		}
+		return template.JS(b), nil
 	},
 }).ParseFS(assets, "web/*.html"))
 
@@ -46,6 +56,7 @@ type Dashboard struct {
 	Sites    []Site
 	Up, Down int
 	Form     Form
+	Query    string // Добавлено для поиска
 }
 
 type SitePage struct {
@@ -70,6 +81,8 @@ func newWeb(store *Store, port int) http.Handler {
 	mux.HandleFunc("GET /{$}", web.dashboard)
 	mux.HandleFunc("POST /{$}", web.add)
 	mux.HandleFunc("GET /sites/{id}", web.detail)
+	mux.HandleFunc("POST /reorder", web.reorder) // Добавлен обработчик перетаскивания
+
 	localIP := fmt.Sprintf("127.0.0.1:%d", port)
 	localName := fmt.Sprintf("localhost:%d", port)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -90,11 +103,13 @@ func newWeb(store *Store, port int) http.Handler {
 }
 
 func (web *Web) dashboard(w http.ResponseWriter, r *http.Request) {
-	web.renderDashboard(w, r, Form{Interval: 30}, http.StatusOK)
+	query := r.URL.Query().Get("q")
+	web.renderDashboard(w, r, Form{Interval: 30}, query, http.StatusOK)
 }
 
-func (web *Web) renderDashboard(w http.ResponseWriter, r *http.Request, form Form, status int) {
-	sites, err := web.store.sites(r.Context())
+func (web *Web) renderDashboard(w http.ResponseWriter, r *http.Request, form Form, query string, status int) {
+	// Передаем query в store.sites
+	sites, err := web.store.sites(r.Context(), query)
 	if err != nil {
 		serverError(w, err)
 		return
@@ -103,7 +118,7 @@ func (web *Web) renderDashboard(w http.ResponseWriter, r *http.Request, form For
 		serverError(w, err)
 		return
 	}
-	view := Dashboard{Sites: sites, Form: form}
+	view := Dashboard{Sites: sites, Form: form, Query: query}
 	for _, site := range sites {
 		if site.Last == nil {
 			continue
@@ -149,7 +164,21 @@ func (web *Web) add(w http.ResponseWriter, r *http.Request) {
 		}
 		form.Error = "Этот адрес уже отслеживается."
 	}
-	web.renderDashboard(w, r, form, http.StatusUnprocessableEntity)
+	// При ошибке сбрасываем query
+	web.renderDashboard(w, r, form, "", http.StatusUnprocessableEntity)
+}
+
+func (web *Web) reorder(w http.ResponseWriter, r *http.Request) {
+	var ids []int64
+	if err := json.NewDecoder(r.Body).Decode(&ids); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if err := web.store.reorder(r.Context(), ids); err != nil {
+		serverError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func parseAddress(input string) (*url.URL, error) {

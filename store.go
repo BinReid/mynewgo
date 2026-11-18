@@ -41,13 +41,14 @@ type Bucket struct {
 type Store struct{ db *sql.DB }
 
 const schema = `
-PRAGMA foreign_keys = ON;
-CREATE TABLE IF NOT EXISTS sites (
-  id INTEGER PRIMARY KEY,
-  name TEXT NOT NULL,
-  url TEXT NOT NULL UNIQUE,
-  interval_seconds INTEGER NOT NULL
-);
+PRAGMA foreign_keys = ON; 
+CREATE TABLE IF NOT EXISTS sites ( 
+    id INTEGER PRIMARY KEY, 
+    name TEXT NOT NULL, 
+    url TEXT NOT NULL UNIQUE, 
+    interval_seconds INTEGER NOT NULL,
+    sort_order INTEGER NOT NULL DEFAULT 0
+); 
 CREATE TABLE IF NOT EXISTS checks (
   id INTEGER PRIMARY KEY,
   site_id INTEGER NOT NULL REFERENCES sites(id),
@@ -83,11 +84,16 @@ func openStore(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	// Миграция: добавляем колонку, если её нет (ошибку игнорируем, если колонка уже существует)
+	db.Exec("ALTER TABLE sites ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0")
 	return &Store{db}, nil
 }
 
 func (s *Store) add(ctx context.Context, name, url string, interval int) (bool, error) {
-	result, err := s.db.ExecContext(ctx, `INSERT INTO sites(name, url, interval_seconds) VALUES (?, ?, ?) ON CONFLICT(url) DO NOTHING`, name, url, interval)
+	var maxOrder int64
+	_ = s.db.QueryRowContext(ctx, `SELECT COALESCE(MAX(sort_order), -1) FROM sites`).Scan(&maxOrder)
+
+	result, err := s.db.ExecContext(ctx, `INSERT INTO sites(name, url, interval_seconds, sort_order) VALUES (?, ?, ?, ?) ON CONFLICT(url) DO NOTHING`, name, url, interval, maxOrder+1)
 	if err != nil {
 		return false, err
 	}
@@ -113,8 +119,16 @@ func scanSite(row interface{ Scan(...any) error }) (Site, error) {
 	return site, err
 }
 
-func (s *Store) sites(ctx context.Context) ([]Site, error) {
-	rows, err := s.db.QueryContext(ctx, siteQuery+` ORDER BY s.id`)
+func (s *Store) sites(ctx context.Context, query string) ([]Site, error) {
+	q := siteQuery
+	var args []any
+	if query != "" {
+		q += ` WHERE s.name LIKE ? OR s.url LIKE ?`
+		args = append(args, "%"+query+"%", "%"+query+"%")
+	}
+	q += ` ORDER BY s.sort_order, s.id`
+
+	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -128,6 +142,20 @@ func (s *Store) sites(ctx context.Context) ([]Site, error) {
 		sites = append(sites, site)
 	}
 	return sites, rows.Err()
+}
+
+func (s *Store) reorder(ctx context.Context, ids []int64) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for i, id := range ids {
+		if _, err := tx.ExecContext(ctx, `UPDATE sites SET sort_order = ? WHERE id = ?`, i, id); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (s *Store) site(ctx context.Context, id int64) (Site, error) {

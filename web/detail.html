@@ -1,45 +1,91 @@
 {{define "detail"}}
-<!DOCTYPE html>
-<html lang="ru">
-<head><title>{{.Site.Name}} · Uptime Monitor</title>{{template "head"}}</head>
-<body>
+{{template "head"}}
 {{template "header"}}
 <main class="shell">
-  <a href="/" class="back">← Все сайты</a>
-  <div class="page-heading detail-heading"><div><h1>{{.Site.Name}}</h1><p><a href="{{.Site.URL}}" target="_blank" rel="noreferrer">{{.Site.URL}} ↗</a></p></div></div>
-  <div id="site-data" data-refresh>
-    <section class="metrics" aria-label="Последняя проверка">
-      <div class="panel metric"><span class="metric-label">Текущий статус</span><div>{{template "status" .Site.Last}}</div></div>
-      <div class="panel metric"><span class="metric-label">Задержка</span><strong>{{with .Site.Last}}{{if .OK}}{{.Latency}} <small>мс</small>{{else}}—{{end}}{{else}}—{{end}}</strong></div>
-      <div class="panel metric"><span class="metric-label">Последняя проверка</span>{{with .Site.Last}}<time datetime="{{datetime .At}}">{{date .At}}</time>{{else}}<strong>—</strong>{{end}}</div>
-    </section>
-    <section class="panel chart-panel" aria-labelledby="latency-heading">
-      <header class="panel-heading"><h2 id="latency-heading">История задержек</h2><span class="muted">Последние 24 часа</span></header>
-      {{if .Checks}}
-      <div class="chart-body">
-        <canvas class="latency-chart" role="img" aria-label="График задержек успешных HTTP-проверок и отметки сбоев за сутки"></canvas>
-        <script type="application/json" class="chart-data">{{.Checks}}</script>
-        <div class="chart-window" hidden data-start="{{.Now.Start}}" data-end="{{.Now.End}}" data-interval="{{.Site.Interval}}"></div>
-        <div class="legend"><span><i class="dot up"></i> Задержка, мс</span><span><i class="dot down"></i> Сбой</span></div>
-        <noscript><p>Для отображения графика включите JavaScript.</p></noscript>
-      </div>
-      {{else}}<div class="empty"><p>График появится после первой проверки.</p></div>{{end}}
-    </section>
-    <section class="panel incidents" aria-labelledby="incidents-heading">
-      <header class="panel-heading"><h2 id="incidents-heading">Инциденты</h2></header>
-      {{if .Incidents}}
-      <div class="table-scroll"><table>
-        <thead><tr><th>Причина</th><th>Начало</th><th>Восстановление</th><th>Длительность</th></tr></thead>
-        <tbody>{{range .Incidents}}<tr>
-          <td>{{.Problem}}</td><td><time datetime="{{datetime .Started}}">{{date .Started}}</time></td>
-          {{if .Resolved.Valid}}<td><time datetime="{{datetime .Resolved.Int64}}">{{date .Resolved.Int64}}</time></td><td>{{duration .Started .Resolved.Int64}}</td>
-          {{else}}<td><span class="status down">Продолжается</span></td><td>—</td>{{end}}
-        </tr>{{end}}</tbody>
-      </table></div>
-      {{else}}<div class="empty"><p>Инцидентов пока нет.</p></div>{{end}}
-    </section>
+  <a class="back" href="/">← Все сайты</a>
+  <div class="page-heading">
+    <div>
+      <h1>{{.Site.Name}}</h1>
+      <p><a href="{{.Site.URL}}" rel="noopener">{{.Site.URL}} ↗</a></p>
+    </div>
   </div>
+
+  <div class="metrics">
+    <div class="metric panel">
+      <span class="metric-label">Текущий статус</span>
+      <div>
+        {{template "status" .Site.Last}}
+        {{if and .Site.Last (not .Site.Last.OK)}}
+        <div class="problem-text">⚠ {{.Site.Last.Problem}}</div>
+        {{end}}
+      </div>
+    </div>
+    <div class="metric panel">
+      <span class="metric-label">Задержка</span>
+      <strong>{{with .Site.Last}}{{if .OK}}{{.Latency}} <small>мс</small>{{else}}—{{end}}{{else}}—{{end}}</strong>
+    </div>
+    <div class="metric panel">
+      <span class="metric-label">Последняя проверка</span>
+      <time>{{with .Site.Last}}{{date .At}}{{else}}—{{end}}</time>
+    </div>
+  </div>
+
+  <section class="panel chart-panel">
+    <div class="panel-heading">
+      <h2>История задержек</h2>
+      <span class="muted">Последние 24 часа</span>
+    </div>
+    <div class="chart-body">
+      {{if .Checks}}
+      <canvas class="latency-chart"></canvas>
+      <script class="chart-data" type="application/json">{{json .Checks}}</script>
+      <div class="chart-window" data-start="{{.Now.Start}}" data-end="{{.Now.End}}" data-interval="30"></div>
+      <div class="legend">
+        <span><span class="dot up"></span>Задержка, мс</span>
+        <span><span class="dot down"></span>Сбой</span>
+      </div>
+      {{else}}
+      <p class="empty">График появится после первой проверки.</p>
+      {{end}}
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-heading">
+      <h2>Инциденты</h2>
+    </div>
+    {{if .Incidents}}
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>Причина</th>
+            <th>Начало</th>
+            <th>Восстановление</th>
+            <th>Длительность</th>
+          </tr>
+        </thead>
+        <tbody>
+          {{range .Incidents}}
+          <tr>
+            <td>{{.Problem}}</td>
+            <td>{{date .Started}}</td>
+            <td>
+              {{if .Resolved.Valid}}{{date .Resolved.Int64}}{{else}}<span class="muted">Продолжается</span>{{end}}
+            </td>
+            <td>
+              {{if .Resolved.Valid}}{{duration .Started .Resolved.Int64}}{{else}}—{{end}}
+            </td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+    </div>
+    {{else}}
+    <div class="empty">
+      <p>Инцидентов пока нет.</p>
+    </div>
+    {{end}}
+  </section>
 </main>
-</body>
-</html>
 {{end}}
