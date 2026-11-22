@@ -1,5 +1,8 @@
 {{define "detail"}}
-{{template "head"}}
+<!DOCTYPE html>
+<html lang="ru">
+<head><title>{{.Site.Name}} · Uptime Monitor</title>{{template "head"}}</head>
+<body>
 {{template "header"}}
 <main class="shell">
   <a class="back" href="/">← Все сайты</a>
@@ -8,8 +11,10 @@
       <h1>{{.Site.Name}}</h1>
       <p><a href="{{.Site.URL}}" rel="noopener">{{.Site.URL}} ↗</a></p>
     </div>
+    <div class="site-actions"><a class="button secondary" href="/sites/{{.Site.ID}}/edit">Изменить</a><a class="button danger-outline" href="/sites/{{.Site.ID}}/edit#delete-site">Удалить</a></div>
   </div>
 
+  <div id="site-data" data-refresh>
   <div class="metrics">
     <div class="metric panel">
       <span class="metric-label">Текущий статус</span>
@@ -37,9 +42,9 @@
     </div>
     <div class="chart-body">
       {{if .Checks}}
-      <canvas class="latency-chart"></canvas>
+      <canvas class="latency-chart" role="img" aria-label="История задержек и сбоев за сутки"></canvas>
       <script class="chart-data" type="application/json">{{json .Checks}}</script>
-      <div class="chart-window" data-start="{{.Now.Start}}" data-end="{{.Now.End}}" data-interval="30"></div>
+      <div class="chart-window" hidden data-start="{{.Now.Start}}" data-end="{{.Now.End}}" data-interval="{{.Site.Interval}}"></div>
       <div class="legend">
         <span><span class="dot up"></span>Задержка, мс</span>
         <span><span class="dot down"></span>Сбой</span>
@@ -87,5 +92,8 @@
     </div>
     {{end}}
   </section>
+  </div>
 </main>
+</body>
+</html>
 {{end}}

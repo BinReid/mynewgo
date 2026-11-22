@@ -2,11 +2,14 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -60,7 +63,7 @@ func (m *Monitor) dispatch(ctx context.Context, now time.Time, active map[int64]
 			if ctx.Err() != nil {
 				return
 			}
-			if err := m.store.record(ctx, site.ID, check); err != nil && ctx.Err() == nil {
+			if err := m.store.recordSite(ctx, site, check); err != nil && ctx.Err() == nil {
 				log.Printf("save check for site %d: %v", site.ID, err)
 			}
 		}(site)
@@ -82,17 +85,34 @@ func (m *Monitor) check(ctx context.Context, address string) Check {
 	response, err := m.client.Do(request)
 	check := Check{At: time.Now().Unix(), Latency: time.Since(start).Milliseconds()}
 	if err != nil {
-		check.Problem = "Ошибка соединения"
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			check.Problem = "Истёк тайм-аут"
-		}
+		check.Problem = connectionProblem(ctx, err)
 		return check
 	}
 	defer response.Body.Close()
 	check.Code = response.StatusCode
 	check.OK = check.Code >= 200 && check.Code < 300
 	if !check.OK {
-		check.Problem = fmt.Sprintf("HTTP %d", check.Code)
+		check.Problem = fmt.Sprintf("HTTP %d · %s", check.Code, http.StatusText(check.Code))
 	}
 	return check
+}
+
+func connectionProblem(ctx context.Context, err error) string {
+	var dns *net.DNSError
+	var certificate *tls.CertificateVerificationError
+	var network net.Error
+	switch {
+	case errors.Is(ctx.Err(), context.DeadlineExceeded), errors.As(err, &network) && network.Timeout():
+		return "Истёк тайм-аут"
+	case errors.As(err, &dns):
+		return "Ошибка DNS — не удалось определить IP-адрес сайта"
+	case errors.As(err, &certificate):
+		return "Ошибка TLS — не удалось проверить сертификат сайта"
+	case errors.Is(err, syscall.ECONNREFUSED), errors.Is(err, syscall.Errno(10061)):
+		return "Соединение отклонено сервером"
+	case errors.Is(err, syscall.ECONNRESET), errors.Is(err, syscall.Errno(10054)):
+		return "Сервер разорвал соединение"
+	default:
+		return "Ошибка соединения — " + err.Error()
+	}
 }

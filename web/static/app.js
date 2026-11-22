@@ -11,6 +11,10 @@ document.addEventListener('click', (event) => {
 
 let hoveredChart = null;
 let drawChart = null;
+let draggedRow = null;
+let savingOrder = false;
+let requestVersion = 0;
+let searchTimer;
 const timeLabel = new Intl.DateTimeFormat('ru', { hour: '2-digit', minute: '2-digit' });
 
 function initChart() {
@@ -103,94 +107,133 @@ function initChart() {
   drawChart();
 }
 
-function initSortable() {
-  const list = document.querySelector('[data-sortable]');
-  if (!list) return;
-
-  const searchInput = document.querySelector('.search-form input[name="q"]');
-  if (searchInput && searchInput.value.trim() !== '') {
-    list.querySelectorAll('[data-id]').forEach(row => row.removeAttribute('draggable'));
-    return;
-  }
-
-  let dragEl = null;
-
-  list.querySelectorAll('[data-id]').forEach(row => {
-    row.setAttribute('draggable', 'true');
-
-    row.addEventListener('dragstart', (e) => {
-      dragEl = row;
-      row.classList.add('dragging');
-      e.dataTransfer.effectAllowed = 'move';
-      e.dataTransfer.setData('text/plain', row.dataset.id);
-    });
-
-    row.addEventListener('dragend', () => {
-      row.classList.remove('dragging');
-      list.querySelectorAll('[data-id]').forEach(r => {
-        r.classList.remove('drag-over-top', 'drag-over-bottom');
-      });
-      if (dragEl) saveOrder();
-      dragEl = null;
-    });
-
-    row.addEventListener('dragover', (e) => {
-      if (!dragEl || dragEl === row) return;
-      e.preventDefault();
-      e.dataTransfer.dropEffect = 'move';
-      const rect = row.getBoundingClientRect();
-      const midY = rect.top + rect.height / 2;
-      row.classList.remove('drag-over-top', 'drag-over-bottom');
-      row.classList.add(e.clientY < midY ? 'drag-over-top' : 'drag-over-bottom');
-    });
-
-    row.addEventListener('dragleave', () => {
-      row.classList.remove('drag-over-top', 'drag-over-bottom');
-    });
-
-    row.addEventListener('drop', (e) => {
-      e.preventDefault();
-      if (!dragEl || dragEl === row) return;
-      const rect = row.getBoundingClientRect();
-      const midY = rect.top + rect.height / 2;
-      if (e.clientY < midY) list.insertBefore(dragEl, row);
-      else list.insertBefore(dragEl, row.nextSibling);
-      row.classList.remove('drag-over-top', 'drag-over-bottom');
-    });
+function clearDropTarget() {
+  document.querySelectorAll('.drag-over-top, .drag-over-bottom').forEach((row) => {
+    row.classList.remove('drag-over-top', 'drag-over-bottom');
   });
+}
 
-  function saveOrder() {
-    const ids = Array.from(list.querySelectorAll('[data-id]'))
-      .map(el => parseInt(el.dataset.id, 10));
-    fetch('/reorder', {
+async function moveSite(row, target, after) {
+  if (savingOrder || row === target) return;
+  savingOrder = true;
+  requestVersion++;
+  const message = document.getElementById('order-message');
+  message.textContent = 'Сохраняем порядок…';
+  try {
+    const response = await fetch('/sites/order', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(ids),
-    }).catch(() => {});
+      body: JSON.stringify({ id: Number(row.dataset.id), target: Number(target.dataset.id), after }),
+    });
+    if (!response.ok) throw new Error('save failed');
+    target.insertAdjacentElement(after ? 'afterend' : 'beforebegin', row);
+    message.textContent = 'Порядок сохранён';
+  } catch {
+    message.textContent = 'Не удалось сохранить порядок. Повторите перемещение.';
+  } finally {
+    savingOrder = false;
+    requestVersion++;
   }
 }
 
+document.addEventListener('dragstart', (event) => {
+  const handle = event.target.closest('.grip');
+  if (!handle || savingOrder) { event.preventDefault(); return; }
+  draggedRow = handle.closest('[data-id]');
+  draggedRow.classList.add('dragging');
+  requestVersion++;
+  event.dataTransfer.effectAllowed = 'move';
+  event.dataTransfer.setData('text/plain', draggedRow.dataset.id);
+});
+
+document.addEventListener('dragover', (event) => {
+  const target = event.target.closest('[data-id]');
+  if (!draggedRow || !target || target === draggedRow || savingOrder) return;
+  event.preventDefault();
+  event.dataTransfer.dropEffect = 'move';
+  clearDropTarget();
+  const bounds = target.getBoundingClientRect();
+  target.classList.add(event.clientY > bounds.top + bounds.height / 2 ? 'drag-over-bottom' : 'drag-over-top');
+});
+
+document.addEventListener('drop', (event) => {
+  const target = event.target.closest('[data-id]');
+  if (!draggedRow || !target || target === draggedRow) return;
+  event.preventDefault();
+  const bounds = target.getBoundingClientRect();
+  moveSite(draggedRow, target, event.clientY > bounds.top + bounds.height / 2);
+  clearDropTarget();
+});
+
+document.addEventListener('dragend', () => {
+  draggedRow?.classList.remove('dragging');
+  draggedRow = null;
+  clearDropTarget();
+});
+
+document.addEventListener('keydown', (event) => {
+  const handle = event.target.closest('.grip');
+  if (!handle || !['ArrowUp', 'ArrowDown'].includes(event.key)) return;
+  event.preventDefault();
+  const rows = [...document.querySelectorAll('[data-id]')];
+  const row = handle.closest('[data-id]');
+  const after = event.key === 'ArrowDown';
+  const target = rows[rows.indexOf(row) + (after ? 1 : -1)];
+  if (target) moveSite(row, target, after);
+});
+
+const searchForm = document.getElementById('site-search');
+const searchInput = searchForm?.querySelector('input[name="q"]');
+
+function searchSites() {
+  clearTimeout(searchTimer);
+  const address = new URL(location.href);
+  if (searchInput.value.trim()) address.searchParams.set('q', searchInput.value.trim());
+  else address.searchParams.delete('q');
+  history.replaceState(null, '', address.pathname + address.search);
+  document.querySelector('.add-form').action = address.pathname + address.search;
+  updateContent(true);
+}
+
+searchInput?.addEventListener('input', () => {
+  requestVersion++;
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(searchSites, 200);
+});
+searchForm?.addEventListener('submit', (event) => {
+  event.preventDefault();
+  searchSites();
+});
+searchForm?.querySelector('.search-reset').addEventListener('click', (event) => {
+  event.preventDefault();
+  searchInput.value = '';
+  searchSites();
+  searchInput.focus();
+});
+
 initChart();
-initSortable();
 globalThis.addEventListener('resize', () => drawChart?.());
 
-async function refresh() {
+async function updateContent(searching = false) {
   try {
-    const current = document.querySelector('[data-refresh]') || document.querySelector('main.shell');
-    if (!current || document.hidden || hoveredChart || current.contains(document.activeElement)) return;
+    const current = document.querySelector('[data-refresh]');
+    if (!current || document.hidden || hoveredChart || draggedRow || savingOrder || current.contains(document.activeElement)) return;
+    const version = ++requestVersion;
     const response = await fetch(location.pathname + location.search, { cache: 'no-store' });
-    if (!response.ok) return;
+    if (!response.ok) throw new Error('refresh failed');
     const documentCopy = new DOMParser().parseFromString(await response.text(), 'text/html');
-    const next = documentCopy.querySelector('main.shell');
-    if (next && !document.hidden && !hoveredChart && !current.contains(document.activeElement) && current.innerHTML !== next.innerHTML) {
+    const next = documentCopy.getElementById(current.id);
+    if (next && version === requestVersion && !document.hidden && !hoveredChart && !draggedRow && !savingOrder && !current.contains(document.activeElement) && current.innerHTML !== next.innerHTML) {
       current.replaceWith(next);
       initChart();
-      initSortable();
     }
   } catch {
-    // Keep the last visible results if polling fails.
-  } finally {
-    globalThis.setTimeout(refresh, 5000);
+    if (searching) document.getElementById('order-message').textContent = 'Не удалось выполнить поиск. Повторите запрос.';
   }
+}
+
+async function refresh() {
+  await updateContent();
+  globalThis.setTimeout(refresh, 5000);
 }
 globalThis.setTimeout(refresh, 5000);

@@ -3,20 +3,23 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
 )
 
 type Site struct {
-	ID        int64
-	Name, URL string
-	Interval  int
-	Last      *Check
-	Samples   []Bucket
+	ID         int64
+	Name, URL  string
+	Interval   int
+	Generation string
+	Last       *Check
+	Samples    []Bucket
 }
 
 type Check struct {
@@ -47,7 +50,9 @@ CREATE TABLE IF NOT EXISTS sites (
     name TEXT NOT NULL, 
     url TEXT NOT NULL UNIQUE, 
     interval_seconds INTEGER NOT NULL,
-    sort_order INTEGER NOT NULL DEFAULT 0
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    generation TEXT NOT NULL DEFAULT '',
+    check_requested INTEGER NOT NULL DEFAULT 0
 ); 
 CREATE TABLE IF NOT EXISTS checks (
   id INTEGER PRIMARY KEY,
@@ -84,16 +89,77 @@ func openStore(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
-	// Миграция: добавляем колонку, если её нет (ошибку игнорируем, если колонка уже существует)
-	db.Exec("ALTER TABLE sites ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0")
+	if err := migrateOrder(db); err != nil {
+		db.Close()
+		return nil, err
+	}
 	return &Store{db}, nil
 }
 
-func (s *Store) add(ctx context.Context, name, url string, interval int) (bool, error) {
-	var maxOrder int64
-	_ = s.db.QueryRowContext(ctx, `SELECT COALESCE(MAX(sort_order), -1) FROM sites`).Scan(&maxOrder)
+func migrateOrder(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	rows, err := tx.Query(`PRAGMA table_info(sites)`)
+	if err != nil {
+		return err
+	}
+	hasOrder := false
+	hasGeneration, hasRequested := false, false
+	for rows.Next() {
+		var index, required, primary int
+		var name, kind string
+		var defaultValue any
+		if err := rows.Scan(&index, &name, &kind, &required, &defaultValue, &primary); err != nil {
+			rows.Close()
+			return err
+		}
+		hasOrder = hasOrder || name == "sort_order"
+		hasGeneration = hasGeneration || name == "generation"
+		hasRequested = hasRequested || name == "check_requested"
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	if !hasOrder {
+		if _, err := tx.Exec(`ALTER TABLE sites ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`UPDATE sites SET sort_order = id`); err != nil {
+			return err
+		}
+		var legacyOrder int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'site_order'`).Scan(&legacyOrder); err != nil {
+			return err
+		}
+		if legacyOrder > 0 {
+			if _, err := tx.Exec(`UPDATE sites SET sort_order = COALESCE((SELECT position FROM site_order WHERE site_id = sites.id), id)`); err != nil {
+				return err
+			}
+		}
+	}
+	if !hasGeneration {
+		if _, err := tx.Exec(`ALTER TABLE sites ADD COLUMN generation TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
+	if !hasRequested {
+		if _, err := tx.Exec(`ALTER TABLE sites ADD COLUMN check_requested INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(`UPDATE sites SET generation = lower(hex(randomblob(16))) WHERE generation = ''`); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
 
-	result, err := s.db.ExecContext(ctx, `INSERT INTO sites(name, url, interval_seconds, sort_order) VALUES (?, ?, ?, ?) ON CONFLICT(url) DO NOTHING`, name, url, interval, maxOrder+1)
+func (s *Store) add(ctx context.Context, name, url string, interval int) (bool, error) {
+	result, err := s.db.ExecContext(ctx, `INSERT INTO sites(name, url, interval_seconds, sort_order, generation) VALUES (?, ?, ?, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM sites), lower(hex(randomblob(16)))) ON CONFLICT(url) DO NOTHING`, name, url, interval)
 	if err != nil {
 		return false, err
 	}
@@ -102,17 +168,17 @@ func (s *Store) add(ctx context.Context, name, url string, interval int) (bool, 
 }
 
 const siteQuery = `SELECT s.id, s.name, s.url, s.interval_seconds,
-  c.checked_at, c.latency_ms, c.ok, c.status_code, c.problem
+  c.checked_at, c.latency_ms, c.ok, c.status_code, c.problem, s.generation
 FROM sites s LEFT JOIN checks c ON c.id = (
   SELECT id FROM checks WHERE site_id = s.id ORDER BY checked_at DESC, id DESC LIMIT 1
-)`
+) AND s.check_requested = 0`
 
 func scanSite(row interface{ Scan(...any) error }) (Site, error) {
 	var site Site
 	var at, latency, code sql.NullInt64
 	var ok sql.NullBool
 	var problem sql.NullString
-	err := row.Scan(&site.ID, &site.Name, &site.URL, &site.Interval, &at, &latency, &ok, &code, &problem)
+	err := row.Scan(&site.ID, &site.Name, &site.URL, &site.Interval, &at, &latency, &ok, &code, &problem, &site.Generation)
 	if at.Valid {
 		site.Last = &Check{at.Int64, latency.Int64, ok.Bool, int(code.Int64), problem.String}
 	}
@@ -120,15 +186,7 @@ func scanSite(row interface{ Scan(...any) error }) (Site, error) {
 }
 
 func (s *Store) sites(ctx context.Context, query string) ([]Site, error) {
-	q := siteQuery
-	var args []any
-	if query != "" {
-		q += ` WHERE s.name LIKE ? OR s.url LIKE ?`
-		args = append(args, "%"+query+"%", "%"+query+"%")
-	}
-	q += ` ORDER BY s.sort_order, s.id`
-
-	rows, err := s.db.QueryContext(ctx, q, args...)
+	rows, err := s.db.QueryContext(ctx, siteQuery+` ORDER BY s.sort_order, s.id`)
 	if err != nil {
 		return nil, err
 	}
@@ -139,7 +197,9 @@ func (s *Store) sites(ctx context.Context, query string) ([]Site, error) {
 		if err != nil {
 			return nil, err
 		}
-		sites = append(sites, site)
+		if strings.Contains(strings.ToLower(site.Name+" "+site.URL), strings.ToLower(strings.TrimSpace(query))) {
+			sites = append(sites, site)
+		}
 	}
 	return sites, rows.Err()
 }
@@ -150,8 +210,86 @@ func (s *Store) reorder(ctx context.Context, ids []int64) error {
 		return err
 	}
 	defer tx.Rollback()
+	var count int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM sites`).Scan(&count); err != nil {
+		return err
+	}
+	if len(ids) != count {
+		return errInvalidOrder
+	}
+	seen := make(map[int64]bool, len(ids))
 	for i, id := range ids {
-		if _, err := tx.ExecContext(ctx, `UPDATE sites SET sort_order = ? WHERE id = ?`, i, id); err != nil {
+		if id < 1 || seen[id] {
+			return errInvalidOrder
+		}
+		seen[id] = true
+		result, err := tx.ExecContext(ctx, `UPDATE sites SET sort_order = ? WHERE id = ?`, i, id)
+		if err != nil {
+			return err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if affected != 1 {
+			return errInvalidOrder
+		}
+	}
+	return tx.Commit()
+}
+
+var errInvalidOrder = errors.New("invalid site order")
+
+func (s *Store) move(ctx context.Context, id, target int64, after bool) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	rows, err := tx.QueryContext(ctx, `SELECT id FROM sites ORDER BY sort_order, id`)
+	if err != nil {
+		return err
+	}
+	var ids []int64
+	found := false
+	for rows.Next() {
+		var current int64
+		if err := rows.Scan(&current); err != nil {
+			rows.Close()
+			return err
+		}
+		if current == id {
+			found = true
+		} else {
+			ids = append(ids, current)
+		}
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	if !found || id == target {
+		return errInvalidOrder
+	}
+	index := -1
+	for i, current := range ids {
+		if current == target {
+			index = i
+			break
+		}
+	}
+	if index < 0 {
+		return errInvalidOrder
+	}
+	if after {
+		index++
+	}
+	ids = append(ids, 0)
+	copy(ids[index+1:], ids[index:])
+	ids[index] = id
+	for i, current := range ids {
+		if _, err := tx.ExecContext(ctx, `UPDATE sites SET sort_order = ? WHERE id = ?`, i, current); err != nil {
 			return err
 		}
 	}
@@ -257,11 +395,32 @@ WHERE site_id = ? ORDER BY started_at DESC, id DESC LIMIT 30`, id)
 }
 
 func (s *Store) record(ctx context.Context, id int64, check Check) error {
+	return s.recordCheck(ctx, id, "", check)
+}
+
+func (s *Store) recordSite(ctx context.Context, site Site, check Check) error {
+	return s.recordCheck(ctx, site.ID, site.Generation, check)
+}
+
+func (s *Store) recordCheck(ctx context.Context, id int64, generation string, check Check) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	var current string
+	if err := tx.QueryRowContext(ctx, `SELECT generation FROM sites WHERE id = ?`, id).Scan(&current); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		return err
+	}
+	if generation != "" && generation != current {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE sites SET check_requested = 0 WHERE id = ?`, id); err != nil {
+		return err
+	}
 	if _, err = tx.ExecContext(ctx, `INSERT INTO checks(site_id, checked_at, latency_ms, ok, status_code, problem)
 VALUES (?, ?, ?, ?, ?, ?)`, id, check.At, check.Latency, check.OK, check.Code, check.Problem); err != nil {
 		return err
@@ -274,6 +433,66 @@ ON CONFLICT(site_id) WHERE resolved_at IS NULL DO NOTHING`, id, check.At, check.
 	}
 	if err != nil {
 		return fmt.Errorf("update incident: %w", err)
+	}
+	return tx.Commit()
+}
+
+var errDuplicateSite = errors.New("site URL already exists")
+
+func (s *Store) update(ctx context.Context, id int64, name, address string, interval int) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var previous string
+	if err := tx.QueryRowContext(ctx, `SELECT url FROM sites WHERE id = ?`, id).Scan(&previous); err != nil {
+		return err
+	}
+	var duplicate bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sites WHERE url = ? AND id <> ?)`, address, id).Scan(&duplicate); err != nil {
+		return err
+	}
+	if duplicate {
+		return errDuplicateSite
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE sites SET name = ?, url = ?, interval_seconds = ?, generation = lower(hex(randomblob(16))), check_requested = CASE WHEN ? THEN 1 ELSE check_requested END WHERE id = ?`, name, address, interval, previous != address, id); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) delete(ctx context.Context, id int64) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM checks WHERE site_id = ?`, id); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM incidents WHERE site_id = ?`, id); err != nil {
+		return err
+	}
+	var legacyOrder bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'site_order')`).Scan(&legacyOrder); err != nil {
+		return err
+	}
+	if legacyOrder {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM site_order WHERE site_id = ?`, id); err != nil {
+			return err
+		}
+	}
+	result, err := tx.ExecContext(ctx, `DELETE FROM sites WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count == 0 {
+		return sql.ErrNoRows
 	}
 	return tx.Commit()
 }

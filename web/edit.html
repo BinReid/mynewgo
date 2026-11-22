@@ -1,0 +1,37 @@
+{{define "edit"}}
+<!DOCTYPE html>
+<html lang="ru">
+<head><title>Изменить {{.Site.Name}} · Uptime Monitor</title>{{template "head"}}</head>
+<body>
+{{template "header"}}
+<main class="shell">
+  <a class="back" href="/sites/{{.Site.ID}}">← К сайту</a>
+  <div class="page-heading"><div><h1>Настройки сайта</h1><p>{{.Site.Name}}</p></div></div>
+  <section class="panel settings-panel" aria-labelledby="edit-heading">
+    <h2 id="edit-heading">Изменить сайт</h2>
+    {{if .Form.Error}}<p class="form-error" role="alert">{{.Form.Error}}</p>{{end}}
+    <form class="add-form edit-form" method="post" action="/sites/{{.Site.ID}}/edit">
+      <label>Название<input name="name" value="{{.Form.Name}}" maxlength="80" placeholder="Название сайта"></label>
+      <label>Адрес сайта<input name="url" type="url" value="{{.Form.URL}}" maxlength="2048" required placeholder="https://example.com"></label>
+      <label>Интервал<select name="interval">
+        <option value="15" {{if eq .Form.Interval 15}}selected{{end}}>15 секунд</option>
+        <option value="30" {{if eq .Form.Interval 30}}selected{{end}}>30 секунд</option>
+        <option value="60" {{if eq .Form.Interval 60}}selected{{end}}>1 минута</option>
+        <option value="300" {{if eq .Form.Interval 300}}selected{{end}}>5 минут</option>
+      </select></label>
+      <div class="form-actions"><button class="button primary" type="submit">Сохранить изменения</button><a class="button secondary" href="/sites/{{.Site.ID}}">Отмена</a></div>
+    </form>
+    <p class="settings-note">История проверок и инцидентов сохраняется при редактировании, включая смену адреса. Новый адрес будет проверен сразу после сохранения, когда освободится место.</p>
+  </section>
+  <section class="panel settings-panel delete-panel" id="delete-site" aria-labelledby="delete-heading">
+    <h2 id="delete-heading">Удалить сайт</h2>
+    <p class="settings-note">Сайт «{{.Site.Name}}» будет удалён вместе со всей историей проверок и инцидентов.</p>
+    <form method="post" action="/sites/{{.Site.ID}}/delete">
+      <label class="delete-confirm"><input type="checkbox" name="confirm" value="yes" required> Подтверждаю удаление сайта и его истории</label>
+      <button class="button danger" type="submit">Удалить сайт</button>
+    </form>
+  </section>
+</main>
+</body>
+</html>
+{{end}}

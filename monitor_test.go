@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -115,5 +117,26 @@ func TestCheckTimeout(t *testing.T) {
 	check := monitor.check(context.Background(), fixture.URL)
 	if check.OK || check.Problem != "Истёк тайм-аут" {
 		t.Fatalf("expected a timed out check, got %+v", check)
+	}
+}
+
+func TestConnectionFailureReasons(t *testing.T) {
+	ctx := context.Background()
+	if problem := connectionProblem(ctx, &net.DNSError{Err: "no such host", Name: "missing.invalid", IsNotFound: true}); !strings.Contains(problem, "DNS") {
+		t.Fatalf("missing DNS reason: %s", problem)
+	}
+	fixture := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	address := fixture.URL
+	fixture.Close()
+	monitor := Monitor{client: &http.Client{}, timeout: time.Second}
+	check := monitor.check(ctx, address)
+	if check.OK || !strings.Contains(check.Problem, "отклонено") {
+		t.Fatalf("missing refused-connection reason: %+v", check)
+	}
+	tlsFixture := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer tlsFixture.Close()
+	check = monitor.check(ctx, tlsFixture.URL)
+	if check.OK || !strings.Contains(check.Problem, "TLS") {
+		t.Fatalf("missing certificate reason: %+v", check)
 	}
 }

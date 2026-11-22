@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
+	"io"
 	"io/fs"
 	"log"
 	"net/http"
@@ -18,15 +19,14 @@ import (
 	"unicode/utf8"
 )
 
-// Исправлено: web/*.html и web/static/* вместо web/.html
 //go:embed web/*.html web/static/*
 var assets embed.FS
 
 var durationUnits = strings.NewReplacer("h", " ч ", "m", " мин ", "s", " с")
 
 var pages = template.Must(template.New("pages").Funcs(template.FuncMap{
-	"date": func(at int64) string { return time.Unix(at, 0).Local().Format("02.01.2006 15:04:05") },
-	"clock": func(at int64) string { return time.Unix(at, 0).Local().Format("15:04:05") },
+	"date":     func(at int64) string { return time.Unix(at, 0).Local().Format("02.01.2006 15:04:05") },
+	"clock":    func(at int64) string { return time.Unix(at, 0).Local().Format("15:04:05") },
 	"datetime": func(at int64) string { return time.Unix(at, 0).UTC().Format(time.RFC3339) },
 	"duration": func(from, to int64) string {
 		return strings.TrimSpace(durationUnits.Replace((time.Duration(to-from) * time.Second).String()))
@@ -35,7 +35,6 @@ var pages = template.Must(template.New("pages").Funcs(template.FuncMap{
 	"bucketTitle": func(b Bucket) string {
 		return fmt.Sprintf("%s · успешно: %d, сбои: %d", time.Unix(b.At, 0).Local().Format("02.01 15:04"), b.OK, b.Failed)
 	},
-	// Добавлена функция json для безопасной передачи данных в <script>
 	"json": func(v any) (template.JS, error) {
 		b, err := json.Marshal(v)
 		if err != nil {
@@ -57,6 +56,7 @@ type Dashboard struct {
 	Up, Down int
 	Form     Form
 	Query    string // Добавлено для поиска
+	Total    int
 }
 
 type SitePage struct {
@@ -70,6 +70,11 @@ type CheckWindow struct {
 	Start, End int64
 }
 
+type EditPage struct {
+	Site Site
+	Form Form
+}
+
 func newWeb(store *Store, port int) http.Handler {
 	web := &Web{store}
 	static, err := fs.Sub(assets, "web/static")
@@ -81,7 +86,11 @@ func newWeb(store *Store, port int) http.Handler {
 	mux.HandleFunc("GET /{$}", web.dashboard)
 	mux.HandleFunc("POST /{$}", web.add)
 	mux.HandleFunc("GET /sites/{id}", web.detail)
+	mux.HandleFunc("GET /sites/{id}/edit", web.edit)
+	mux.HandleFunc("POST /sites/{id}/edit", web.save)
+	mux.HandleFunc("POST /sites/{id}/delete", web.delete)
 	mux.HandleFunc("POST /reorder", web.reorder) // Добавлен обработчик перетаскивания
+	mux.HandleFunc("POST /sites/order", web.move)
 
 	localIP := fmt.Sprintf("127.0.0.1:%d", port)
 	localName := fmt.Sprintf("localhost:%d", port)
@@ -103,13 +112,12 @@ func newWeb(store *Store, port int) http.Handler {
 }
 
 func (web *Web) dashboard(w http.ResponseWriter, r *http.Request) {
-	query := r.URL.Query().Get("q")
+	query := strings.TrimSpace(r.URL.Query().Get("q"))
 	web.renderDashboard(w, r, Form{Interval: 30}, query, http.StatusOK)
 }
 
 func (web *Web) renderDashboard(w http.ResponseWriter, r *http.Request, form Form, query string, status int) {
-	// Передаем query в store.sites
-	sites, err := web.store.sites(r.Context(), query)
+	sites, err := web.store.sites(r.Context(), "")
 	if err != nil {
 		serverError(w, err)
 		return
@@ -118,8 +126,11 @@ func (web *Web) renderDashboard(w http.ResponseWriter, r *http.Request, form For
 		serverError(w, err)
 		return
 	}
-	view := Dashboard{Sites: sites, Form: form, Query: query}
+	view := Dashboard{Form: form, Query: query, Total: len(sites)}
 	for _, site := range sites {
+		if strings.Contains(strings.ToLower(site.Name+" "+site.URL), strings.ToLower(query)) {
+			view.Sites = append(view.Sites, site)
+		}
 		if site.Last == nil {
 			continue
 		}
@@ -133,10 +144,30 @@ func (web *Web) renderDashboard(w http.ResponseWriter, r *http.Request, form For
 }
 
 func (web *Web) add(w http.ResponseWriter, r *http.Request) {
+	form, ok := readSiteForm(w, r)
+	if !ok {
+		return
+	}
+	if form.Error == "" {
+		created, err := web.store.add(r.Context(), form.Name, form.URL, form.Interval)
+		if err != nil {
+			serverError(w, err)
+			return
+		}
+		if created {
+			http.Redirect(w, r, "/", http.StatusSeeOther)
+			return
+		}
+		form.Error = "Этот адрес уже отслеживается."
+	}
+	web.renderDashboard(w, r, form, strings.TrimSpace(r.URL.Query().Get("q")), http.StatusUnprocessableEntity)
+}
+
+func readSiteForm(w http.ResponseWriter, r *http.Request) (Form, bool) {
 	r.Body = http.MaxBytesReader(w, r.Body, 8192)
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "Не удалось прочитать форму", http.StatusBadRequest)
-		return
+		return Form{}, false
 	}
 	interval, _ := strconv.Atoi(r.PostForm.Get("interval"))
 	form := Form{URL: strings.TrimSpace(r.PostForm.Get("url")), Name: strings.TrimSpace(r.PostForm.Get("name")), Interval: interval}
@@ -149,32 +180,121 @@ func (web *Web) add(w http.ResponseWriter, r *http.Request) {
 	case interval != 15 && interval != 30 && interval != 60 && interval != 300:
 		form.Error = "Выберите интервал проверки из списка."
 	default:
-		name := form.Name
-		if name == "" {
-			name = address.Host
+		if form.Name == "" {
+			form.Name = address.Host
 		}
-		created, err := web.store.add(r.Context(), name, address.String(), interval)
-		if err != nil {
+		form.URL = address.String()
+	}
+	return form, true
+}
+
+func (web *Web) edit(w http.ResponseWriter, r *http.Request) {
+	site, ok := web.findSite(w, r)
+	if !ok {
+		return
+	}
+	render(w, "edit", EditPage{site, Form{Name: site.Name, URL: site.URL, Interval: site.Interval}}, http.StatusOK)
+}
+
+func (web *Web) save(w http.ResponseWriter, r *http.Request) {
+	site, ok := web.findSite(w, r)
+	if !ok {
+		return
+	}
+	form, ok := readSiteForm(w, r)
+	if !ok {
+		return
+	}
+	if form.Error == "" {
+		err := web.store.update(r.Context(), site.ID, form.Name, form.URL, form.Interval)
+		switch {
+		case errors.Is(err, errDuplicateSite):
+			form.Error = "Этот адрес уже отслеживается другим сайтом."
+		case errors.Is(err, sql.ErrNoRows):
+			http.NotFound(w, r)
+			return
+		case err != nil:
 			serverError(w, err)
 			return
-		}
-		if created {
-			http.Redirect(w, r, "/", http.StatusSeeOther)
+		default:
+			http.Redirect(w, r, fmt.Sprintf("/sites/%d", site.ID), http.StatusSeeOther)
 			return
 		}
-		form.Error = "Этот адрес уже отслеживается."
 	}
-	// При ошибке сбрасываем query
-	web.renderDashboard(w, r, form, "", http.StatusUnprocessableEntity)
+	render(w, "edit", EditPage{site, form}, http.StatusUnprocessableEntity)
+}
+
+func (web *Web) delete(w http.ResponseWriter, r *http.Request) {
+	site, ok := web.findSite(w, r)
+	if !ok {
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1024)
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "Не удалось прочитать форму", http.StatusBadRequest)
+		return
+	}
+	if r.PostForm.Get("confirm") != "yes" {
+		form := Form{Name: site.Name, URL: site.URL, Interval: site.Interval, Error: "Для удаления подтвердите удаление сайта и его истории."}
+		render(w, "edit", EditPage{site, form}, http.StatusUnprocessableEntity)
+		return
+	}
+	if err := web.store.delete(r.Context(), site.ID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			http.NotFound(w, r)
+			return
+		}
+		serverError(w, err)
+		return
+	}
+	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
 func (web *Web) reorder(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1024*1024)
 	var ids []int64
-	if err := json.NewDecoder(r.Body).Decode(&ids); err != nil {
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(&ids); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if err := decoder.Decode(new(any)); err != io.EOF {
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
 		return
 	}
 	if err := web.store.reorder(r.Context(), ids); err != nil {
+		if errors.Is(err, errInvalidOrder) {
+			http.Error(w, "Список сайтов изменился. Обновите страницу.", http.StatusConflict)
+			return
+		}
+		serverError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (web *Web) move(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1024)
+	var move struct {
+		ID     int64 `json:"id"`
+		Target int64 `json:"target"`
+		After  bool  `json:"after"`
+	}
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&move); err != nil || move.ID < 1 || move.Target < 1 {
+		http.Error(w, "Некорректный порядок сайтов", http.StatusBadRequest)
+		return
+	}
+	if err := decoder.Decode(new(any)); err != io.EOF {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if err := web.store.move(r.Context(), move.ID, move.Target, move.After); err != nil {
+		if errors.Is(err, errInvalidOrder) {
+			http.Error(w, "Список сайтов изменился. Обновите страницу.", http.StatusConflict)
+			return
+		}
 		serverError(w, err)
 		return
 	}
@@ -204,21 +324,30 @@ func parseAddress(input string) (*url.URL, error) {
 	return address, nil
 }
 
-func (web *Web) detail(w http.ResponseWriter, r *http.Request) {
+func (web *Web) findSite(w http.ResponseWriter, r *http.Request) (Site, bool) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil || id < 1 {
 		http.NotFound(w, r)
-		return
+		return Site{}, false
 	}
 	site, err := web.store.site(r.Context(), id)
 	if errors.Is(err, sql.ErrNoRows) {
 		http.NotFound(w, r)
-		return
+		return Site{}, false
 	}
 	if err != nil {
 		serverError(w, err)
+		return Site{}, false
+	}
+	return site, true
+}
+
+func (web *Web) detail(w http.ResponseWriter, r *http.Request) {
+	site, ok := web.findSite(w, r)
+	if !ok {
 		return
 	}
+	id := site.ID
 	now := time.Now()
 	checks, err := web.store.checks(r.Context(), id, now)
 	if err != nil {
