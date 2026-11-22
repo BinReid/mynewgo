@@ -232,8 +232,46 @@ async function updateContent(searching = false) {
   }
 }
 
+// ---------- Клиентская проверка доступности с этого устройства ----------
+const clientRows = () => [...document.querySelectorAll('.site-row[data-id]')];
+const probing = new Set();
+
+async function probeClient() {
+  if (document.hidden) return;
+  for (const row of clientRows()) {
+    const id = Number(row.dataset.id);
+    if (probing.has(id)) continue;
+    const link = row.querySelector('.site-name a');
+    const address = row.querySelector('.site-url')?.textContent?.trim();
+    if (!address) continue;
+    probing.add(id);
+    const start = performance.now();
+    try {
+      await fetch(address, { mode: 'no-cors', cache: 'no-store', redirect: 'follow' });
+      await sendProbe(id, true, Math.round(performance.now() - start));
+    } catch {
+      await sendProbe(id, false, Math.round(performance.now() - start));
+    } finally {
+      probing.delete(id);
+    }
+  }
+}
+
+async function sendProbe(siteId, reachable, latencyMs) {
+  try {
+    await fetch('/probe', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ siteId, reachable, latencyMs }),
+    });
+  } catch {
+    // молча игнорируем — обновится при следующем цикле
+  }
+}
+
 async function refresh() {
   await updateContent();
+  await probeClient();
   globalThis.setTimeout(refresh, 5000);
 }
 globalThis.setTimeout(refresh, 5000);

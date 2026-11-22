@@ -275,3 +275,7 @@ td { border-top: 1px solid var(--border); font-variant-numeric: tabular-nums; }
   .grip { display: inline-flex; }
   .site-row { cursor: default; }
 }
+
+/* ---------- Колонка клиентской проверки ---------- */
+.client-status { min-width: 0; }
+.client-status .status { align-self: flex-start; }

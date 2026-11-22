@@ -2,6 +2,18 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#0e131d">
+  <meta name="robots" content="{{if .Robots}}{{.Robots}}{{else}}index,follow{{end}}">
+  <meta name="description" content="{{if .Description}}{{.Description}}{{else}}Uptime Monitor — локальный монитор доступности HTTP и HTTPS. Статусы сайтов, задержки и история проверок за 24 часа.{{end}}">
+  {{if .Canonical}}<link rel="canonical" href="{{.Canonical}}">{{end}}
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Uptime Monitor">
+  <meta property="og:title" content="{{if .Title}}{{.Title}}{{else}}Uptime Monitor{{end}}">
+  <meta property="og:description" content="{{if .Description}}{{.Description}}{{else}}Локальный монитор доступности сайтов: статусы, задержки и история проверок.{{end}}">
+  {{if .Canonical}}<meta property="og:url" content="{{.Canonical}}">{{end}}
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:title" content="{{if .Title}}{{.Title}}{{else}}Uptime Monitor{{end}}">
+  <meta name="twitter:description" content="{{if .Description}}{{.Description}}{{else}}Локальный монитор доступности сайтов: статусы, задержки и история проверок.{{end}}">
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/static/app.css">
   <script defer src="/static/app.js"></script>
@@ -10,8 +22,7 @@
 {{define "header"}}
 <header class="topbar">
   <div class="shell topbar-inner">
-    <a class="brand" href="/"><span class="brand-mark"></span>Uptime Monitor</a>
-    <a class="nav-link" href="/">Обзор</a>
+    <a class="brand" href="/" aria-label="Uptime Monitor — на главную"><span class="brand-mark"></span>Uptime Monitor</a>
   </div>
 </header>
 {{end}}

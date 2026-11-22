@@ -1,7 +1,21 @@
 {{define "dashboard"}}
 <!DOCTYPE html>
 <html lang="ru">
-<head><title>Обзор · Uptime Monitor</title>{{template "head"}}</head>
+<head>
+  <title>Uptime Monitor — доступность сайтов, статусы и история за 24 часа</title>
+  {{template "head"}}
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "WebApplication",
+    "name": "Uptime Monitor",
+    "applicationCategory": "UtilitiesApplication",
+    "operatingSystem": "Windows, Linux, macOS",
+    "description": "Локальный монитор доступности HTTP и HTTPS: статусы сайтов, задержки и история проверок за 24 часа.",
+    "offers": { "@type": "Offer", "price": "0", "priceCurrency": "RUB" }
+  }
+  </script>
+</head>
 <body>
 {{template "header"}}
 <main class="shell">
@@ -62,9 +76,9 @@
     </div>
   </div>
 
-  <section class="panel">
+  <section class="panel" aria-labelledby="sites-heading">
     <div class="panel-heading">
-      <h2>Отслеживаемые сайты</h2>
+      <h2 id="sites-heading">Отслеживаемые сайты</h2>
       {{if .Sites}}
       <span class="legend">
         <span><span class="dot up"></span>Доступен</span>
@@ -78,8 +92,8 @@
     <div class="site-columns">
       <span></span>
       <span>Сайт</span>
-      <span>Статус</span>
-      <span>Задержка</span>
+      <span>Сервер</span>
+      <span>Это устройство</span>
       <span>Доступность за 24 часа</span>
     </div>
     <ul class="site-list" data-sortable>
@@ -98,8 +112,9 @@
           {{template "status" .Last}}
           {{with .Last}}<time class="muted" datetime="{{datetime .At}}">{{clock .At}}</time>{{end}}
         </div>
-        <div class="last-latency">
-          {{if .Last}}{{if .Last.OK}}{{.Last.Latency}} <span>мс</span>{{else}}—{{end}}{{else}}—{{end}}
+        <div class="status-col client-status" data-client-id="{{.ID}}">
+          {{template "status" .LastClient}}
+          {{with .LastClient}}<time class="muted" datetime="{{datetime .At}}">{{clock .At}}</time>{{end}}
         </div>
         <div class="uptime">
           <div class="strip">

@@ -44,7 +44,10 @@ var pages = template.Must(template.New("pages").Funcs(template.FuncMap{
 	},
 }).ParseFS(assets, "web/*.html"))
 
-type Web struct{ store *Store }
+type Web struct {
+	store   *Store
+	baseURL string
+}
 
 type Form struct {
 	Name, URL, Error string
@@ -52,18 +55,22 @@ type Form struct {
 }
 
 type Dashboard struct {
-	Sites    []Site
-	Up, Down int
-	Form     Form
-	Query    string // Добавлено для поиска
-	Total    int
+	Sites       []Site
+	Up, Down    int
+	Form        Form
+	Query       string
+	Total       int
+	Canonical   string
+	Description string
 }
 
 type SitePage struct {
-	Site      Site
-	Checks    []Check
-	Incidents []Incident
-	Now       CheckWindow
+	Site        Site
+	Checks      []Check
+	Incidents   []Incident
+	Now         CheckWindow
+	Canonical   string
+	Description string
 }
 
 type CheckWindow struct {
@@ -71,12 +78,15 @@ type CheckWindow struct {
 }
 
 type EditPage struct {
-	Site Site
-	Form Form
+	Site        Site
+	Form        Form
+	Canonical   string
+	Description string
+	Robots      string
 }
 
 func newWeb(store *Store, port int) http.Handler {
-	web := &Web{store}
+	web := &Web{store: store}
 	static, err := fs.Sub(assets, "web/static")
 	if err != nil {
 		panic(err)
@@ -89,8 +99,9 @@ func newWeb(store *Store, port int) http.Handler {
 	mux.HandleFunc("GET /sites/{id}/edit", web.edit)
 	mux.HandleFunc("POST /sites/{id}/edit", web.save)
 	mux.HandleFunc("POST /sites/{id}/delete", web.delete)
-	mux.HandleFunc("POST /reorder", web.reorder) // Добавлен обработчик перетаскивания
+	mux.HandleFunc("POST /reorder", web.reorder)
 	mux.HandleFunc("POST /sites/order", web.move)
+	mux.HandleFunc("POST /probe", web.probe)
 
 	localIP := fmt.Sprintf("127.0.0.1:%d", port)
 	localName := fmt.Sprintf("localhost:%d", port)
@@ -106,9 +117,18 @@ func newWeb(store *Store, port int) http.Handler {
 				return
 			}
 		}
+		web.baseURL = "http://" + r.Host
 		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
 		mux.ServeHTTP(w, r)
 	})
+}
+
+func (web *Web) canonical(path string) string {
+	if web.baseURL == "" {
+		return path
+	}
+	return web.baseURL + path
 }
 
 func (web *Web) dashboard(w http.ResponseWriter, r *http.Request) {
@@ -126,7 +146,17 @@ func (web *Web) renderDashboard(w http.ResponseWriter, r *http.Request, form For
 		serverError(w, err)
 		return
 	}
-	view := Dashboard{Form: form, Query: query, Total: len(sites)}
+	view := Dashboard{
+		Form:        form,
+		Query:       query,
+		Total:       len(sites),
+		Canonical:   web.canonical("/"),
+		Description: "Uptime Monitor — локальный монитор доступности HTTP и HTTPS. Статусы сайтов, задержки и история проверок за 24 часа.",
+	}
+	if query != "" {
+		view.Canonical = web.canonical("/?q=" + url.QueryEscape(query))
+		view.Description = fmt.Sprintf("Результаты поиска «%s» в Uptime Monitor: статусы, задержки и доступность сайтов за 24 часа.", query)
+	}
 	for _, site := range sites {
 		if strings.Contains(strings.ToLower(site.Name+" "+site.URL), strings.ToLower(query)) {
 			view.Sites = append(view.Sites, site)
@@ -193,7 +223,12 @@ func (web *Web) edit(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	render(w, "edit", EditPage{site, Form{Name: site.Name, URL: site.URL, Interval: site.Interval}}, http.StatusOK)
+	render(w, "edit", EditPage{
+		Site:        site,
+		Form:        Form{Name: site.Name, URL: site.URL, Interval: site.Interval},
+		Canonical:   web.canonical(fmt.Sprintf("/sites/%d/edit", site.ID)),
+		Description: fmt.Sprintf("Настройки монитора для %s (%s).", site.Name, site.URL),
+	}, http.StatusOK)
 }
 
 func (web *Web) save(w http.ResponseWriter, r *http.Request) {
@@ -221,7 +256,12 @@ func (web *Web) save(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	render(w, "edit", EditPage{site, form}, http.StatusUnprocessableEntity)
+	render(w, "edit", EditPage{
+		Site:        site,
+		Form:        form,
+		Canonical:   web.canonical(fmt.Sprintf("/sites/%d/edit", site.ID)),
+		Description: fmt.Sprintf("Настройки монитора для %s (%s).", site.Name, site.URL),
+	}, http.StatusUnprocessableEntity)
 }
 
 func (web *Web) delete(w http.ResponseWriter, r *http.Request) {
@@ -236,7 +276,12 @@ func (web *Web) delete(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.PostForm.Get("confirm") != "yes" {
 		form := Form{Name: site.Name, URL: site.URL, Interval: site.Interval, Error: "Для удаления подтвердите удаление сайта и его истории."}
-		render(w, "edit", EditPage{site, form}, http.StatusUnprocessableEntity)
+		render(w, "edit", EditPage{
+			Site:        site,
+			Form:        form,
+			Canonical:   web.canonical(fmt.Sprintf("/sites/%d/edit", site.ID)),
+			Description: fmt.Sprintf("Настройки монитора для %s (%s).", site.Name, site.URL),
+		}, http.StatusUnprocessableEntity)
 		return
 	}
 	if err := web.store.delete(r.Context(), site.ID); err != nil {
@@ -295,6 +340,34 @@ func (web *Web) move(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Список сайтов изменился. Обновите страницу.", http.StatusConflict)
 			return
 		}
+		serverError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (web *Web) probe(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 4096)
+	var body struct {
+		SiteID    int64 `json:"siteId"`
+		Reachable bool  `json:"reachable"`
+		Latency   int64 `json:"latencyMs"`
+	}
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&body); err != nil || body.SiteID < 1 || body.Latency < 0 || body.Latency > 600000 {
+		http.Error(w, "Invalid probe", http.StatusBadRequest)
+		return
+	}
+	if err := decoder.Decode(new(any)); err != io.EOF {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+	check := Check{At: time.Now().Unix(), Latency: body.Latency, OK: body.Reachable}
+	if !body.Reachable {
+		check.Problem = "Нет соединения с этого устройства"
+	}
+	if err := web.store.recordClient(r.Context(), body.SiteID, check); err != nil {
 		serverError(w, err)
 		return
 	}
@@ -360,7 +433,18 @@ func (web *Web) detail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	start, end := dayWindow(now)
-	render(w, "detail", SitePage{site, checks, incidents, CheckWindow{start, end}}, http.StatusOK)
+	description := fmt.Sprintf("Мониторинг %s (%s): текущий статус, задержка, история проверок и инцидентов за 24 часа.", site.Name, site.URL)
+	if site.Last != nil && !site.Last.OK {
+		description = fmt.Sprintf("%s (%s) — сбой: %s. История проверок и инцидентов за 24 часа.", site.Name, site.URL, site.Last.Problem)
+	}
+	render(w, "detail", SitePage{
+		Site:        site,
+		Checks:      checks,
+		Incidents:   incidents,
+		Now:         CheckWindow{start, end},
+		Canonical:   web.canonical(fmt.Sprintf("/sites/%d", site.ID)),
+		Description: description,
+	}, http.StatusOK)
 }
 
 func availability(buckets []Bucket) string {

@@ -19,6 +19,7 @@ type Site struct {
 	Interval   int
 	Generation string
 	Last       *Check
+	LastClient *Check
 	Samples    []Bucket
 }
 
@@ -61,7 +62,8 @@ CREATE TABLE IF NOT EXISTS checks (
   latency_ms INTEGER NOT NULL,
   ok INTEGER NOT NULL,
   status_code INTEGER NOT NULL,
-  problem TEXT NOT NULL
+  problem TEXT NOT NULL,
+  source TEXT NOT NULL DEFAULT 'server'
 );
 CREATE INDEX IF NOT EXISTS checks_site_time ON checks(site_id, checked_at, id);
 CREATE INDEX IF NOT EXISTS checks_time ON checks(checked_at);
@@ -90,6 +92,10 @@ func openStore(path string) (*Store, error) {
 		return nil, err
 	}
 	if err := migrateOrder(db); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err := migrateSource(db); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -158,6 +164,40 @@ func migrateOrder(db *sql.DB) error {
 	return tx.Commit()
 }
 
+func migrateSource(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	rows, err := tx.Query(`PRAGMA table_info(checks)`)
+	if err != nil {
+		return err
+	}
+	hasSource := false
+	for rows.Next() {
+		var index, required, primary int
+		var name, kind string
+		var defaultValue any
+		if err := rows.Scan(&index, &name, &kind, &required, &defaultValue, &primary); err != nil {
+			rows.Close()
+			return err
+		}
+		hasSource = hasSource || name == "source"
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	if !hasSource {
+		if _, err := tx.Exec(`ALTER TABLE checks ADD COLUMN source TEXT NOT NULL DEFAULT 'server'`); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 func (s *Store) add(ctx context.Context, name, url string, interval int) (bool, error) {
 	result, err := s.db.ExecContext(ctx, `INSERT INTO sites(name, url, interval_seconds, sort_order, generation) VALUES (?, ?, ?, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM sites), lower(hex(randomblob(16)))) ON CONFLICT(url) DO NOTHING`, name, url, interval)
 	if err != nil {
@@ -168,19 +208,31 @@ func (s *Store) add(ctx context.Context, name, url string, interval int) (bool, 
 }
 
 const siteQuery = `SELECT s.id, s.name, s.url, s.interval_seconds,
-  c.checked_at, c.latency_ms, c.ok, c.status_code, c.problem, s.generation
+  c.checked_at, c.latency_ms, c.ok, c.status_code, c.problem, s.generation,
+  cc.checked_at, cc.latency_ms, cc.ok, cc.status_code, cc.problem
 FROM sites s LEFT JOIN checks c ON c.id = (
-  SELECT id FROM checks WHERE site_id = s.id ORDER BY checked_at DESC, id DESC LIMIT 1
-) AND s.check_requested = 0`
+  SELECT id FROM checks WHERE site_id = s.id AND source = 'server' ORDER BY checked_at DESC, id DESC LIMIT 1
+) AND s.check_requested = 0
+LEFT JOIN checks cc ON cc.id = (
+  SELECT id FROM checks WHERE site_id = s.id AND source = 'client' ORDER BY checked_at DESC, id DESC LIMIT 1
+)`
 
 func scanSite(row interface{ Scan(...any) error }) (Site, error) {
 	var site Site
 	var at, latency, code sql.NullInt64
 	var ok sql.NullBool
 	var problem sql.NullString
-	err := row.Scan(&site.ID, &site.Name, &site.URL, &site.Interval, &at, &latency, &ok, &code, &problem, &site.Generation)
+	var cat, clatency, ccode sql.NullInt64
+	var cok sql.NullBool
+	var cproblem sql.NullString
+	err := row.Scan(&site.ID, &site.Name, &site.URL, &site.Interval,
+		&at, &latency, &ok, &code, &problem, &site.Generation,
+		&cat, &clatency, &cok, &ccode, &cproblem)
 	if at.Valid {
 		site.Last = &Check{at.Int64, latency.Int64, ok.Bool, int(code.Int64), problem.String}
+	}
+	if cat.Valid {
+		site.LastClient = &Check{cat.Int64, clatency.Int64, cok.Bool, int(ccode.Int64), cproblem.String}
 	}
 	return site, err
 }
@@ -338,7 +390,7 @@ func (s *Store) buckets(ctx context.Context, sites []Site, now time.Time) error 
 		byID[sites[i].ID] = sites[i].Samples
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT site_id, (checked_at - ?) / ?, SUM(ok), COUNT(*) - SUM(ok)
-FROM checks WHERE checked_at BETWEEN ? AND ? GROUP BY 1, 2`, start, bucketSeconds, start, end)
+FROM checks WHERE checked_at BETWEEN ? AND ? AND source = 'server' GROUP BY 1, 2`, start, bucketSeconds, start, end)
 	if err != nil {
 		return err
 	}
@@ -360,7 +412,7 @@ FROM checks WHERE checked_at BETWEEN ? AND ? GROUP BY 1, 2`, start, bucketSecond
 func (s *Store) checks(ctx context.Context, id int64, now time.Time) ([]Check, error) {
 	start, end := dayWindow(now)
 	rows, err := s.db.QueryContext(ctx, `SELECT checked_at, latency_ms, ok, status_code, problem FROM checks
-WHERE site_id = ? AND checked_at BETWEEN ? AND ? ORDER BY checked_at, id`, id, start, end)
+WHERE site_id = ? AND checked_at BETWEEN ? AND ? AND source = 'server' ORDER BY checked_at, id`, id, start, end)
 	if err != nil {
 		return nil, err
 	}
@@ -395,14 +447,18 @@ WHERE site_id = ? ORDER BY started_at DESC, id DESC LIMIT 30`, id)
 }
 
 func (s *Store) record(ctx context.Context, id int64, check Check) error {
-	return s.recordCheck(ctx, id, "", check)
+	return s.recordCheck(ctx, id, "", check, "server")
 }
 
 func (s *Store) recordSite(ctx context.Context, site Site, check Check) error {
-	return s.recordCheck(ctx, site.ID, site.Generation, check)
+	return s.recordCheck(ctx, site.ID, site.Generation, check, "server")
 }
 
-func (s *Store) recordCheck(ctx context.Context, id int64, generation string, check Check) error {
+func (s *Store) recordClient(ctx context.Context, id int64, check Check) error {
+	return s.recordCheck(ctx, id, "", check, "client")
+}
+
+func (s *Store) recordCheck(ctx context.Context, id int64, generation string, check Check, source string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -418,21 +474,25 @@ func (s *Store) recordCheck(ctx context.Context, id int64, generation string, ch
 	if generation != "" && generation != current {
 		return nil
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE sites SET check_requested = 0 WHERE id = ?`, id); err != nil {
+	if source == "server" {
+		if _, err := tx.ExecContext(ctx, `UPDATE sites SET check_requested = 0 WHERE id = ?`, id); err != nil {
+			return err
+		}
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO checks(site_id, checked_at, latency_ms, ok, status_code, problem, source)
+VALUES (?, ?, ?, ?, ?, ?, ?)`, id, check.At, check.Latency, check.OK, check.Code, check.Problem, source); err != nil {
 		return err
 	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO checks(site_id, checked_at, latency_ms, ok, status_code, problem)
-VALUES (?, ?, ?, ?, ?, ?)`, id, check.At, check.Latency, check.OK, check.Code, check.Problem); err != nil {
-		return err
-	}
-	if check.OK {
-		_, err = tx.ExecContext(ctx, `UPDATE incidents SET resolved_at = ? WHERE site_id = ? AND resolved_at IS NULL`, check.At, id)
-	} else {
-		_, err = tx.ExecContext(ctx, `INSERT INTO incidents(site_id, started_at, problem) VALUES (?, ?, ?)
+	if source == "server" {
+		if check.OK {
+			_, err = tx.ExecContext(ctx, `UPDATE incidents SET resolved_at = ? WHERE site_id = ? AND resolved_at IS NULL`, check.At, id)
+		} else {
+			_, err = tx.ExecContext(ctx, `INSERT INTO incidents(site_id, started_at, problem) VALUES (?, ?, ?)
 ON CONFLICT(site_id) WHERE resolved_at IS NULL DO NOTHING`, id, check.At, check.Problem)
-	}
-	if err != nil {
-		return fmt.Errorf("update incident: %w", err)
+		}
+		if err != nil {
+			return fmt.Errorf("update incident: %w", err)
+		}
 	}
 	return tx.Commit()
 }

@@ -1,7 +1,20 @@
 {{define "detail"}}
 <!DOCTYPE html>
 <html lang="ru">
-<head><title>{{.Site.Name}} · Uptime Monitor</title>{{template "head"}}</head>
+<head>
+  <title>{{.Site.Name}} — статус и история · Uptime Monitor</title>
+  {{template "head"}}
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "WebPage",
+    "name": "{{.Site.Name}} — статус и история",
+    "description": "{{.Description}}",
+    "url": "{{.Canonical}}",
+    "isPartOf": { "@type": "WebApplication", "name": "Uptime Monitor" }
+  }
+  </script>
+</head>
 <body>
 {{template "header"}}
 <main class="shell">
@@ -9,7 +22,7 @@
   <div class="page-heading">
     <div>
       <h1>{{.Site.Name}}</h1>
-      <p><a href="{{.Site.URL}}" rel="noopener">{{.Site.URL}} ↗</a></p>
+      <p><a href="{{.Site.URL}}" rel="noopener noreferrer nofollow" target="_blank">{{.Site.URL}} ↗</a></p>
     </div>
     <div class="site-actions"><a class="button secondary" href="/sites/{{.Site.ID}}/edit">Изменить</a><a class="button danger-outline" href="/sites/{{.Site.ID}}/edit#delete-site">Удалить</a></div>
   </div>
@@ -35,9 +48,9 @@
     </div>
   </div>
 
-  <section class="panel chart-panel">
+  <section class="panel chart-panel" aria-labelledby="chart-heading">
     <div class="panel-heading">
-      <h2>История задержек</h2>
+      <h2 id="chart-heading">История задержек</h2>
       <span class="muted">Последние 24 часа</span>
     </div>
     <div class="chart-body">
@@ -55,19 +68,19 @@
     </div>
   </section>
 
-  <section class="panel">
+  <section class="panel" aria-labelledby="incidents-heading">
     <div class="panel-heading">
-      <h2>Инциденты</h2>
+      <h2 id="incidents-heading">Инциденты</h2>
     </div>
     {{if .Incidents}}
     <div class="table-scroll">
       <table>
         <thead>
           <tr>
-            <th>Причина</th>
-            <th>Начало</th>
-            <th>Восстановление</th>
-            <th>Длительность</th>
+            <th scope="col">Причина</th>
+            <th scope="col">Начало</th>
+            <th scope="col">Восстановление</th>
+            <th scope="col">Длительность</th>
           </tr>
         </thead>
         <tbody>
